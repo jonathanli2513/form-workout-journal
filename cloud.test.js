@@ -101,6 +101,88 @@ test('sign-in validation and provider errors do not expose raw network details',
   await assert.rejects(adapter.sendSignInLink('owner@example.test', 'https://owner.github.io/form/'), error => error.code === 'over_email_send_rate_limit' && !error.message.includes('RAW TOKEN'));
 });
 
+test('documented sign-in errors give actionable messages without exposing provider details', async () => {
+  const cases = [
+    ['email_address_not_authorized', /Supabase organisation’s member email/],
+    ['email_address_invalid', /deliverable email address/],
+    ['otp_disabled', /Email sign-in is not enabled/],
+    ['email_provider_disabled', /Email sign-in is not enabled/],
+    ['over_email_send_rate_limit', /two emails per hour/],
+    ['over_request_rate_limit', /Wait a few minutes/],
+  ];
+  for (const [code, message] of cases) {
+    const harness = mockAdapter({ signInError: { code, message: 'PRIVATE provider URL and secret token' } });
+    const adapter = await harness.adapter();
+    await assert.rejects(adapter.sendSignInLink('owner@example.test', 'https://owner.github.io/form/'), error => {
+      assert.equal(error.code, code);
+      assert.match(error.message, message);
+      assert.doesNotMatch(error.message, /PRIVATE|secret token/);
+      return true;
+    });
+  }
+});
+
+test('known Supabase cooldowns are parsed and bounded without echoing raw error text', async () => {
+  for (const code of ['over_email_send_rate_limit', 'over_request_rate_limit']) {
+    for (const [message, seconds] of [
+      ['For security purposes, you can only request this after 21 seconds.', 21],
+      ['For security purposes, you can only request this after 60 seconds', 60],
+      ['For security purposes, you can only request this after 7200 seconds.', 3600],
+    ]) {
+      const adapter = await mockAdapter({ signInError: { code, message } }).adapter();
+      await assert.rejects(adapter.sendSignInLink('owner@example.test', 'https://owner.github.io/form/'), error => {
+        assert.equal(error.retryAfterSeconds, seconds);
+        assert.match(error.message, new RegExp(`wait ${seconds} seconds`));
+        return true;
+      });
+    }
+  }
+});
+
+test('unrecognized cooldown text uses a conservative backoff and never leaks raw provider messages', async () => {
+  for (const message of [
+    'email rate limit exceeded',
+    'For security purposes, you can only request this after 0 seconds.',
+    'For security purposes, you can only request this after -1 seconds.',
+    'For security purposes, you can only request this after 1.5 seconds.',
+    'For security purposes, you can only request this after 999999999999999999999 seconds.',
+    'PRIVATE: For security purposes, you can only request this after 21 seconds.',
+    'For security purposes, you can only request this after 21 seconds. PRIVATE token',
+  ]) {
+    const adapter = await mockAdapter({ signInError: { code: 'over_email_send_rate_limit', message } }).adapter();
+    await assert.rejects(adapter.sendSignInLink('owner@example.test', 'https://owner.github.io/form/'), error => {
+      assert.equal(error.retryAfterSeconds, 60);
+      assert.match(error.message, /may take up to an hour/);
+      assert.doesNotMatch(error.message, /PRIVATE|999999999999999999999/);
+      return true;
+    });
+  }
+  const adapter = await mockAdapter({ signInError: { code: 'unknown_provider_failure', message: 'PRIVATE token and URL' } }).adapter();
+  await assert.rejects(adapter.sendSignInLink('owner@example.test', 'https://owner.github.io/form/'), error => {
+    assert.equal(error.message, 'The sign-in email could not be sent. Please try again later.');
+    assert.equal(error.retryAfterSeconds, undefined);
+    return true;
+  });
+});
+
+test('expired sign-in links are explained during session restoration', async () => {
+  const adapter = await mockAdapter({ sessionError: { code: 'otp_expired', message: 'PRIVATE expired link URL' } }).adapter();
+  await assert.rejects(adapter.getSession(), error => {
+    assert.equal(error.code, 'otp_expired');
+    assert.match(error.message, /Request a new link and use the latest email/);
+    assert.doesNotMatch(error.message, /PRIVATE/);
+    return true;
+  });
+});
+
+test('CloudError accepts only bounded integer retry durations', () => {
+  for (const seconds of [undefined, null, -1, 0, 1.5, 3601, Infinity, '60']) {
+    assert.equal(new CloudError('Retry later', 'TEST', null, seconds).retryAfterSeconds, undefined);
+  }
+  assert.equal(new CloudError('Retry later', 'TEST', null, 1).retryAfterSeconds, 1);
+  assert.equal(new CloudError('Retry later', 'TEST', null, 3600).retryAfterSeconds, 3600);
+});
+
 test('an absent cloud row is distinct from a missing table or permission error', async () => {
   const harness = mockAdapter();
   const adapter = await harness.adapter();

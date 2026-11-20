@@ -25,13 +25,17 @@ async function accountFixture() {
   storage.setItem(KEY + ':account:' + OWNER.id, model.serializeBackup(state));
   return { storage, state };
 }
-async function appHarness(storage) {
+async function appHarness(storage, options = {}) {
   const listeners = new Map();
   const dialogListeners = new Map();
   let focused = false;
   let engineOptions;
   const inertElement = () => ({ innerHTML: '', textContent: '', classList: { add() {}, remove() {} }, addEventListener() {} });
   const app = inertElement(), toast = inertElement(), fileInput = inertElement();
+  const emailInput = {value:'owner@example.invalid', reportValidity:()=>true};
+  const NativeDate = Date;
+  const TestDate = class extends NativeDate { static now() { return options.clock?.now ?? NativeDate.now(); } };
+  const mockCloud = options.send ? {getSession:async()=>null,onAuthChange:()=>()=>{},sendSignInLink:options.send} : null;
   const dialog = {
     innerHTML: '', open: false, returnValue: '',
     setAttribute() {},
@@ -43,22 +47,24 @@ async function appHarness(storage) {
   const document = {
     hidden: false,
     activeElement: { matches: () => focused },
-    querySelector(selector) { return ({ '#app': app, '#dialog': dialog, '#toast': toast, '#backup-file': fileInput })[selector] || null; },
+    querySelector(selector) { return ({ '#app': app, '#dialog': dialog, '#toast': toast, '#backup-file': fileInput, '#signin-email': emailInput })[selector] || null; },
     querySelectorAll() { return []; },
     addEventListener(type, fn) { if (!listeners.has(type)) listeners.set(type, []); listeners.get(type).push(fn); },
   };
   const context = vm.createContext({
     ...model, mergeStates,
     createSyncEngine(options) { engineOptions = options; return createSyncEngine(options); },
-    createCloudClient: async () => null,
+    createCloudClient: async () => mockCloud,
     cloudConfig: { url: '', publishableKey: '' },
     document, window: { localStorage: storage, addEventListener() {}, scrollTo() {}, location: { href: 'https://form.example/', reload() {} } },
-    navigator: { onLine: false },
+    navigator: { onLine: Boolean(options.send) },
+    Date: TestDate,
     structuredClone, URL, Blob, DOMException,
     setTimeout() { return 1; }, clearTimeout() {}, setInterval() { return 1; },
   });
   vm.runInContext(source + `\n globalThis.qa = {
     boot, queueAuth, flushAuth: () => authQueue,
+    sendSignInLink, initializeCloud, retrySeconds:signInRetrySeconds,
     state: () => structuredClone(state), owner: () => owner?.id || null,
     pending: () => pendingAccount?.id || null,
     engine: () => syncEngine,
@@ -133,4 +139,38 @@ test('a discard confirmation cannot remove a different session received while th
   await action;
   assert.equal(app.state().activeSession.id, incomingId);
   assert.match(app.toast.textContent, /Nothing was discarded/);
+});
+
+test('email send cooldown survives reload and allows a retry after it expires', async () => {
+  const storage = memoryStorage(), clock = {now:Date.now()};
+  let sent = 0;
+  const options = {clock,send:async()=>{sent++;}};
+  const app = await appHarness(storage,options);
+  await app.initializeCloud();
+  await app.sendSignInLink();
+  await app.sendSignInLink();
+  assert.equal(sent,1);
+  assert.equal(app.retrySeconds(),60);
+  const reopened=await appHarness(storage,options);
+  await reopened.initializeCloud();
+  await reopened.sendSignInLink();
+  assert.equal(sent,1,'reopening the app must not bypass resend protection');
+  clock.now+=61000;
+  await reopened.sendSignInLink();
+  assert.equal(sent,2);
+});
+
+test('simultaneous sign-in submissions send only one email, and rate errors retain their cooldown', async () => {
+  const storage=memoryStorage();
+  let release, sent=0;
+  const app=await appHarness(storage,{send:async()=>{sent++;await new Promise(resolve=>{release=resolve;});throw Object.assign(new Error('Email sending is rate-limited.'),{retryAfterSeconds:21});}});
+  await app.initializeCloud();
+  const first=app.sendSignInLink();
+  const second=app.sendSignInLink();
+  await second;
+  assert.equal(sent,1);
+  release();await first;
+  assert.ok(app.retrySeconds()>=20&&app.retrySeconds()<=21);
+  await app.sendSignInLink();
+  assert.equal(sent,1);
 });

@@ -5,6 +5,7 @@ import { createSyncEngine, mergeStates } from './sync-engine.js';
 
 const KEY = 'form-workout-v1';
 const OWNER_KEY = KEY + ':owner';
+const SIGNIN_RETRY_KEY = KEY + ':signin-retry';
 const SYNC_PREFIX = 'form-sync-v1:';
 const browserStorage = {
   getItem: key => window.localStorage.getItem(key),
@@ -43,6 +44,8 @@ let lastQueuedAuth;
 let explicitSignOut = false;
 let authBusy = false;
 let authFeedback = '';
+let authRetryAt = loadSignInRetry();
+let lastRetrySeconds = 0;
 let signInEmail = '';
 let syncTimeout;
 let uiReady = false;
@@ -395,6 +398,7 @@ function updateLive() {
 setInterval(updateLive,1000);
 window.addEventListener('beforeunload',event=>{if(dirty||memoryUnsaved){event.preventDefault();event.returnValue='';}});
 window.addEventListener('storage',event=>{
+  if(event.key===SIGNIN_RETRY_KEY){authRetryAt=loadSignInRetry();updateSignInRetryUI();return;}
   const ownQueue = owner ? SYNC_PREFIX + encodeURIComponent(owner.id) : null;
   if(event.key!==dataKey()&&event.key!==ownQueue&&event.key!==OWNER_KEY)return;
   externalChange=true;showStorageError();updateSyncUI();
@@ -491,7 +495,7 @@ function recoveryMarkup() {
   return `<section class="sync-recovery"><h3>Recovery backups</h3><p>Previous conflict versions remain on this device. Each download is a regular Form backup that can be restored later.</p>${recoveries.map((entry,index) => `<div class="recovery-row"><div><strong>Saved ${esc(new Date(entry.savedAt).toLocaleString())}</strong><p>${entry.choice === 'local' ? 'Kept this device’s version' : 'Used the cloud version'}</p></div><div class="sync-actions">${listButton('export-recovery','Device copy','download',`data-index="${index}" data-side="local"`)}${listButton('export-recovery','Cloud copy','download',`data-index="${index}" data-side="remote"`)}</div></div>`).join('')}</section>`;
 }
 function signInForm() {
-  return `<form id="signin-form" class="signin-form"><label class="field"><span>Email address</span><input id="signin-email" class="input" type="email" autocomplete="email" inputmode="email" maxlength="320" value="${esc(signInEmail || owner?.email || '')}" placeholder="you@example.com" required aria-label="Email address for sign-in" /></label>${listButton('send-signin','Email me a sign-in link','mail','type="submit"','btn-primary')}<p id="auth-feedback" role="status" class="auth-feedback">${esc(authFeedback)}</p><p class="small muted">Use the same email on every device. Open the emailed link in this browser. No password is needed.</p></form>`;
+  return `<form id="signin-form" class="signin-form"><label class="field"><span>Email address</span><input id="signin-email" class="input" type="email" autocomplete="email" inputmode="email" maxlength="320" value="${esc(signInEmail || owner?.email || '')}" placeholder="you@example.com" required aria-label="Email address for sign-in" /></label>${listButton('send-signin','Email me a sign-in link','mail','type="submit"','btn-primary')}<p id="auth-feedback" role="status" class="auth-feedback">${esc(authFeedback)}</p><p class="small muted">Use your Supabase account email on every device. Open only the most recent sign-in email in this browser; each link works once. This workspace’s email service allows two emails per hour.</p></form>`;
 }
 function accountPanel() {
   let identity;
@@ -518,10 +522,7 @@ function updateSyncUI() {
   if (recoveries) recoveries.innerHTML = recoveryMarkup();
   const manual = document.querySelector('#manual-sync');
   if (manual) manual.disabled = !matchingAccount() || syncStatus.phase === 'syncing' || externalChange || memoryUnsaved;
-  const send = document.querySelector('[data-action="send-signin"]');
-  if (send) { send.disabled = authBusy || cloudStarting; send.innerHTML = `${icon('mail')}${authBusy ? 'Sending…' : 'Email me a sign-in link'}`; }
-  const feedback = document.querySelector('#auth-feedback');
-  if (feedback) feedback.textContent = authFeedback;
+  updateSignInRetryUI();
 }
 function safeRender() {
   if (!uiReady) return;
@@ -632,21 +633,53 @@ async function initializeCloud() {
   })();
   return cloudPromise;
 }
+function loadSignInRetry() {
+  try {
+    const value = Number(browserStorage.getItem(SIGNIN_RETRY_KEY));
+    return Number.isFinite(value) && value > Date.now() && value <= Date.now() + 3605000 ? value : 0;
+  } catch { return 0; }
+}
+function signInRetrySeconds() { return Math.max(0, Math.ceil((authRetryAt - Date.now()) / 1000)); }
+function setSignInRetry(seconds) {
+  const duration = Number.isFinite(seconds) ? Math.min(3600, Math.max(1, seconds)) : 60;
+  authRetryAt = Date.now() + duration * 1000;
+  try { browserStorage.setItem(SIGNIN_RETRY_KEY, String(authRetryAt)); } catch { /* This optional timer must not block local recording. */ }
+}
+function updateSignInRetryUI() {
+  const remaining = signInRetrySeconds();
+  lastRetrySeconds = remaining;
+  const send = document.querySelector('[data-action="send-signin"]');
+  if (send) {
+    send.disabled = authBusy || cloudStarting || remaining > 0;
+    const label = authBusy ? 'Sending…' : remaining ? `Try again in ${elapsed(remaining)}` : 'Email me a sign-in link';
+    send.innerHTML = `${icon('mail')}${label}`;
+  }
+  const feedback = document.querySelector('#auth-feedback');
+  if (feedback) feedback.textContent = authFeedback || (remaining ? 'Please wait before requesting another link. Check your inbox and spam folder for the most recent sign-in email.' : '');
+}
+setInterval(() => { if (signInRetrySeconds() > 0 || lastRetrySeconds > 0) updateSignInRetryUI(); }, 1000);
 async function sendSignInLink() {
   const input = document.querySelector('#signin-email');
   if (!input || !input.reportValidity() || authBusy) return;
+  authRetryAt = Math.max(authRetryAt, loadSignInRetry());
+  if (signInRetrySeconds()) { updateSignInRetryUI(); return; }
   signInEmail = input.value.trim();
   if (!navigator.onLine) { authFeedback = 'Connect to the internet to request a sign-in link.'; updateSyncUI(); return; }
-  if (!cloud) await initializeCloud();
-  if (!cloud) { toast(cloudError || 'Cloud sync has not been configured yet.'); return; }
+  // Lock before awaiting initialization so Enter/clicks cannot send duplicate emails.
   authBusy = true; authFeedback = ''; updateSyncUI();
   try {
+    if (!cloud) await initializeCloud();
+    if (!cloud) { authFeedback = cloudError || 'Cloud sync has not been configured yet.'; return; }
     const returnUrl = new URL('./', window.location.href); returnUrl.search = ''; returnUrl.hash = '';
     await cloud.sendSignInLink(signInEmail, returnUrl.href);
-    authFeedback = `Check ${signInEmail} for your sign-in link. Open it in this browser. Delivery may take a moment.`;
-  } catch (error) { authFeedback = error?.message || 'The sign-in email could not be sent. Try again later.'; }
-  finally { authBusy = false; updateSyncUI(); }
+    setSignInRetry(60);
+    authFeedback = `Check ${signInEmail}, including spam, for the latest sign-in email. Open its link once in this browser. Avoid requesting more links while waiting.`;
+  } catch (error) {
+    authFeedback = error?.message || 'The sign-in email could not be sent. Try again later.';
+    if (error?.retryAfterSeconds) setSignInRetry(error.retryAfterSeconds);
+  } finally { authBusy = false; updateSyncUI(); }
 }
+
 async function signOutAccount() {
   if (dirty || memoryUnsaved) {
     if (!await confirmAction('Sign out on this device?', 'Save your programme or export a backup before leaving any records held only in memory. Saved account records and pending changes remain on this device for your next sign-in.', 'Sign out')) return;

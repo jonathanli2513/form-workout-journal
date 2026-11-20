@@ -8,7 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const output = resolve(root, 'dist');
 const assets = [
   'index.html', 'styles.css', 'app.js', 'model.js', 'cloud.js',
-  'cloud-config.js', 'sync-engine.js', 'icon.svg', 'manifest.webmanifest', '.nojekyll',
+  'cloud-config.js', 'sync-engine.js', 'icon.svg', 'manifest.webmanifest', 'update.html', '.nojekyll',
 ];
 await rm(output, { recursive: true, force: true });
 await mkdir(resolve(output, 'vendor'), { recursive: true });
@@ -26,7 +26,7 @@ await build({
   logLevel: 'warning',
 });
 const hashes = {};
-for (const name of [...assets.filter(name => name !== '.nojekyll'), 'vendor/supabase.js']) {
+for (const name of [...assets.filter(name => !['.nojekyll', 'update.html'].includes(name)), 'vendor/supabase.js']) {
   hashes[`./${name}`] = createHash('sha256').update(await readFile(resolve(output, name))).digest('hex');
 }
 hashes['./'] = hashes['./index.html'];

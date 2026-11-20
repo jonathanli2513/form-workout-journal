@@ -3,10 +3,13 @@ import { validateState } from './model.js';
 const DEFAULT_TIMEOUT_MS = 15000;
 
 export class CloudError extends Error {
-  constructor(message, code = 'CLOUD_UNAVAILABLE', cause) {
+  constructor(message, code = 'CLOUD_UNAVAILABLE', cause, retryAfterSeconds) {
     super(message, { cause });
     this.name = 'CloudError';
     this.code = code;
+    if (Number.isInteger(retryAfterSeconds) && retryAfterSeconds >= 1 && retryAfterSeconds <= 3600) {
+      this.retryAfterSeconds = retryAfterSeconds;
+    }
   }
 }
 
@@ -52,9 +55,40 @@ function documentRow(row) {
 
 function cloudFailure(error, fallback = 'Cloud sync is unavailable. Your changes remain saved on this device.') {
   if (error instanceof CloudError) return error;
+  const code = typeof error?.code === 'string' ? error.code : 'CLOUD_UNAVAILABLE';
+  if (code === 'over_email_send_rate_limit' || code === 'over_request_rate_limit') {
+    // Read only Supabase's documented cooldown sentence. Never echo arbitrary
+    // provider text, which can contain addresses, request URLs, or credentials.
+    const match = typeof error?.message === 'string'
+      ? /^For security purposes, you can only request this after (\d+) seconds\.?$/i.exec(error.message.trim())
+      : null;
+    const seconds = match ? Number(match[1]) : 0;
+    if (Number.isSafeInteger(seconds) && seconds > 0) {
+      const retryAfterSeconds = Math.min(seconds, 3600);
+      return new CloudError(
+        `Please wait ${retryAfterSeconds} seconds before requesting another sign-in link. Check your most recent sign-in email.`,
+        code, error, retryAfterSeconds,
+      );
+    }
+    if (code === 'over_email_send_rate_limit') {
+      return new CloudError(
+        'The built-in email service allows two emails per hour. Sending may take up to an hour to become available. Check your most recent sign-in email before requesting another.',
+        code, error, 60,
+      );
+    }
+    return new CloudError('Too many sign-in requests. Wait a few minutes before trying again.', code, error, 60);
+  }
+  const authMessages = {
+    email_address_not_authorized: 'This email service can send only to your Supabase organisation’s member email. Use the email linked to your Supabase account.',
+    email_address_invalid: 'Enter a deliverable email address. Example and test addresses are not supported.',
+    otp_disabled: 'Email sign-in is not enabled for this app. The app owner needs to enable it.',
+    email_provider_disabled: 'Email sign-in is not enabled for this app. The app owner needs to enable it.',
+    otp_expired: 'This sign-in link is no longer valid. Request a new link and use the latest email.',
+  };
+  if (Object.hasOwn(authMessages, code)) return new CloudError(authMessages[code], code, error);
   // Keep provider codes for handling/review, without exposing tokens, request
   // URLs, or raw provider response details in the product's error messages.
-  return new CloudError(fallback, typeof error?.code === 'string' ? error.code : 'CLOUD_UNAVAILABLE', error);
+  return new CloudError(fallback, code, error);
 }
 
 export function createTimeoutFetch(fetchImpl, timeoutMs = DEFAULT_TIMEOUT_MS) {

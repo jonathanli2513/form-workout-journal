@@ -78,3 +78,9 @@ self.addEventListener('fetch', event => {
   // Extend the event synchronously, then include cache/update work added by fetch.
   event.waitUntil(response.then(() => Promise.allSettled(tasks)).catch(() => {}));
 });
+
+// An explicit click on update.html activates a prepared update. Existing pages
+// are not automatically reloaded, so their unsaved input is left alone.
+self.addEventListener('message', event => {
+  if (event.data?.type === 'FORM_ACTIVATE_UPDATE') event.waitUntil(self.skipWaiting());
+});
