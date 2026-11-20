@@ -22,21 +22,17 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version: '24'
-          package-manager-cache: false
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
       - name: Check JavaScript
         run: npm run check
-      - name: Test workout model
+      - name: Test workout data and sync
         run: npm test
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
-      - name: Prepare static app
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp index.html app.js model.js styles.css .nojekyll dist/
-          for asset in icon.svg manifest.webmanifest; do
-            if [ -f "$asset" ]; then cp "$asset" dist/; fi
-          done
+      - name: Build static app and offline shell
+        run: npm run build
       - name: Upload static app
         uses: actions/upload-pages-artifact@v4
         with:

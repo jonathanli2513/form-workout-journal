@@ -1,15 +1,22 @@
 {
   "name": "form-workout-journal",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "description": "A personal workout planner and journal, hosted on GitHub Pages.",
   "scripts": {
-    "dev": "node server.mjs",
-    "check": "node --check app.js && node --check model.js",
-    "test": "node --test model.test.js"
+    "build": "node scripts/build.mjs",
+    "dev": "npm run build && node server.mjs",
+    "check": "node --check app.js && node --check model.js && node --check cloud.js && node --check cloud-config.js && node --check sync-engine.js && node --check sw.js && node --check scripts/build.mjs && node --check server.mjs",
+    "test": "node --test *.test.js"
   },
   "engines": {
     "node": ">=22"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.119.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
   }
 }

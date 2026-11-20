@@ -1,0 +1,14 @@
+{
+  "id": "./",
+  "name": "Form — Workout journal",
+  "short_name": "Form",
+  "description": "Plan workouts, record every set, and keep your training journal close.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f7fb",
+  "theme_color": "#6554df",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
