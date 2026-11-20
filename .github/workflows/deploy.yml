@@ -1,0 +1,57 @@
+name: Deploy FORM to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: github-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check JavaScript
+        run: npm run check
+      - name: Test workout model
+        run: npm test
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+      - name: Prepare static app
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp index.html app.js model.js styles.css .nojekyll dist/
+          for asset in icon.svg manifest.webmanifest; do
+            if [ -f "$asset" ]; then cp "$asset" dist/; fi
+          done
+      - name: Upload static app
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
